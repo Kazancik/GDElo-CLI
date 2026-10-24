@@ -1,13 +1,28 @@
 import numpy as np
 
-
-
-def calculate_kdc(t: float, c: float, window_freq_list: list, q: float = 1.0, zones: list = None) -> float:
-    e_inv_total = sum([(count * (10.0 / w) ** 3) for w, count in window_freq_list])
+def calculate_kdc(t: float, c: float, window_freq_list: list, q: float, zones: list = None) -> float:
+    """
+    Calculates Raw Mechanical Density adjusted by Multi-Zone Gamemodes & Level Balancing.
+    - Windows: [(size, count), ...]
+    - Zones: [[start, end, weight, mode], ...]
+    """
+    mode_mults = {
+        'ship': 1.50, 's': 1.50,
+        'swing': 1.40, 'sw': 1.40,
+        'ufo': 1.15, 'u': 1.15,
+        'robot': 1.15, 'r': 1.15,
+        'wave': 1.00, 'w': 1.00,
+        'cube': 0.95, 'c': 0.95,
+        'ball': 0.95, 'b': 0.95,
+        'spider': 0.95, 'sp': 0.95
+    }
+    
+    # Pure mechanical window density without needing per-click mode tags
+    e_inv_total = sum([(float(item[1]) * (10.0 / float(item[0])) ** 3) for item in window_freq_list])
     intensity = c ** 1.5
     
     if not zones or len(zones) == 0:
-        zones = [[0.0, 100.0, 100.0]]
+        zones = [[0.0, 100.0, 100.0, 'w']]
         
     total_w = sum([float(z[2]) for z in zones]) or 100.0
     center_of_mass = 0.0
@@ -15,7 +30,13 @@ def calculate_kdc(t: float, c: float, window_freq_list: list, q: float = 1.0, zo
     total_active_span = 0.0
     
     for z in zones:
-        z_start, z_end, z_weight = float(z[0]), float(z[1]), float(z[2])
+        z_start = float(z[0])
+        z_end = float(z[1])
+        z_weight = float(z[2])
+        # Gamemode tag parsed directly from the zone
+        mode = str(z[3]).strip().lower() if len(z) > 3 else 'w'
+        mode_mult = mode_mults.get(mode, 1.0)
+        
         z_w = (z_weight / total_w)
         span_pct = max(1.0, z_end - z_start)
         total_active_span += (span_pct / 100.0)
@@ -24,19 +45,36 @@ def calculate_kdc(t: float, c: float, window_freq_list: list, q: float = 1.0, zo
         center_of_mass += z_w * midpoint
         
         burst = local_density ** 0.38 if local_density >= 1.0 else local_density ** 0.20
-        effective_burst_weight += z_w * burst
+        # Gamemode multiplier scales this specific zone's burst contribution
+        effective_burst_weight += z_w * burst * mode_mult
 
     pos_nerve_factor = 0.85 + 0.50 * (np.clip(center_of_mass, 0.0, 1.0) ** 1.5)
     coverage_factor = np.clip(total_active_span, 0.1, 1.0) ** 0.55
+    
     balancing_multiplier = coverage_factor * effective_burst_weight * pos_nerve_factor
     effective_e_inv = e_inv_total * balancing_multiplier
 
     base = (effective_e_inv + intensity) * q
-    marathon_factor = 0.75 + ((t / 75.0) ** 0.55) * 0.2
+    
+    # ---------------------------------------------------------
+    # 4-STAGE ENDURANCE CURVE (Penalizes <60s, Boosts >180s)
+    # ---------------------------------------------------------
+    if t < 10.0:
+        marathon_factor = (t / 10.0) * 0.002
+    elif t < 60.0:
+        marathon_factor = (t / 60.0) * 0.6
+    else:
+        gentle_slope = 1.0 + (t - 60.0) * (0.25 / 120.0)
+        if t > 180.0:
+            exhaustion = 0.08 * ((t - 180.0) / 60.0) ** 1.6
+        else:
+            exhaustion = 0.0
+        marathon_factor = gentle_slope + exhaustion
+    
     return float((base * marathon_factor) ** 0.7)
 
 
-SM_BASELINE = calculate_kdc(89, 2.0, [(101, 15), (81, 14), (61, 5), (41, 24), (40, 7)], 1.0, [[0.0, 100.0, 100.0]])
+SM_BASELINE = calculate_kdc(89, 2.0, [(101, 15), (81, 14), (61, 5), (41, 24), (40, 7)], 1.0, [[0.0, 100.0, 100.0, 'w']])
 
 def get_elo(raw_points: float) -> float:
     diff = raw_points - SM_BASELINE
@@ -48,7 +86,6 @@ def apply_cps_penalty(w: float, cps: float) -> tuple:
     if x < 15.0:
         return w, 0.0, 240.0 / w
     
-
     term1 = 14500.0 / (1.0 + np.exp(-0.22 * (x - 39.2)))
 
     ramp = max(0.0, x - 56.0)
@@ -65,7 +102,7 @@ def calculate_demonstrated_skill(level_elo: float, pct: float, zones: list = Non
     if pct >= 100: return float(level_elo)
     
     if not zones or len(zones) == 0:
-        zones = [[0.0, 100.0, 100.0]]
+        zones = [[0.0, 100.0, 100.0, 'w']]
         
     total_w = sum([float(z[2]) for z in zones]) or 100.0
     accumulated_weight = 0.0
@@ -86,7 +123,6 @@ def calculate_attempts(player_elo: float, level_elo: float, t: int, is_completed
 
     nerve = 1.0 + ((max(0.0, float(t) - 75.0) / 60.0) ** 1.2)
 
-
     if is_completed or d <= 0:
         tier_rebeat_bonus = 0.65 * ((max(0.0, L - 2716.0) / 1514.0) ** 0.95)
         log_rebeat_base = 1.20 + 2.15 * (min(L, 2716.0) / 2716.0) + tier_rebeat_bonus
@@ -98,14 +134,12 @@ def calculate_attempts(player_elo: float, level_elo: float, t: int, is_completed
             rebeat_base *= decay
         return max(1, int(rebeat_base))
 
-
     log_att_zero = 1.55 + 3.35 * ((min(L, 2716.0) / 2716.0) ** 1.25) + 2.45 * ((max(0.0, L - 2716.0) / 1514.0) ** 0.55)
     log_mastery = 1.20 + 2.15 * (min(L, 2716.0) / 2716.0) + 0.65 * ((max(0.0, L - 2716.0) / 1514.0) ** 0.85)
     
     skill_progress_ratio = np.clip(d / max(1.0, L), 0.0, 1.0)
     current_log = log_mastery + (log_att_zero - log_mastery) * (skill_progress_ratio ** 0.55)
     calc = (10.0 ** current_log) * nerve
-
 
     if L > 6500.0:
         silent_excess = (L - 6500.0) / 400.0
@@ -129,7 +163,7 @@ def calculate_time_to_beat(player_elo: float, level_elo: float, attempts: int, t
     if years > 1e9: return f"{years / 1e9:.1f} Billion Years"
     if years > 1e6: return f"{years / 1e6:.1f} Million Years"
     return f"{int(years):,} years"
-# These are very inaccurate
+
 def get_rank_metadata(elo: float) -> str:
     if elo <= 1.0: return "Classic Easy Difficulties"
     if elo <= 1000: return "Easy Demon"
@@ -159,8 +193,6 @@ def fmt_attempts(n: int) -> str:
     if n >= 1e6: return f"{n / 1e6:.2f} Million"
     return f"{n:,}"
 
-
-
 def parse_windows(raw_str: str) -> list:
     """Parses 'size,count | size,count' into [(size, count) tuple]"""
     pairs = []
@@ -172,19 +204,23 @@ def parse_windows(raw_str: str) -> list:
     return pairs
 
 def parse_zones(raw_str: str) -> list:
-    """Parses 'start,end,weight | ...' into [[s, e, w], tuple]"""
+    """Parses 'start,end,weight,mode | ...' into [[s, e, w, mode], ...]"""
     zones = []
     for chunk in raw_str.split("|"):
         chunk = chunk.strip()
         if not chunk: continue
         parts = chunk.split(",")
-        zones.append([float(parts[0].strip()), float(parts[1].strip()), float(parts[2].strip())])
+        start = float(parts[0].strip())
+        end = float(parts[1].strip())
+        weight = float(parts[2].strip())
+        mode = parts[3].strip().lower() if len(parts) > 3 else 'w'
+        zones.append([start, end, weight, mode])
     return zones
 
 def main():
     while True:
         print("\n" + "=" * 55)
-        print("          GD PHYSICS ENGINE - COMMAND LINE")
+        print("        GD PHYSICS ENGINE - COMMAND LINE")
         print("=" * 55)
         print("[1] Calculate Level Elo & Difficulty (From Specs)")
         print("[2] Calculate Attempts & Time to Beat (Player vs Level)")
@@ -209,8 +245,10 @@ def main():
             q_str = input("Deco multiplier q [default 1.0]: ").strip()
             q = float(q_str) if q_str else 1.0
             
-            z_str = input("Multi-Zone Weights (start,end,weight | ...) [default 0,100,100]: ").strip()
-            zones = parse_zones(z_str) if z_str else [[0.0, 100.0, 100.0]]
+            print("Multi-Zone Weights format: start,end,weight,mode | ...")
+            print("Example: 0,50,50,ship | 50,100,50,cube")
+            z_str = input("Zones [default 0,100,100,w]: ").strip()
+            zones = parse_zones(z_str) if z_str else [[0.0, 100.0, 100.0, 'w']]
             
             print("Enter windows in format: size,count | size,count")
             print("Example: 10,50 | 5,10 | 2,3 | 1,1 (size is in 240Hz frames)")
@@ -260,10 +298,10 @@ def main():
                 
                 mode_str = "Mastered Re-beat" if is_done else "First Clear Discovery"
                 print("\n" + "-" * 50)
-                print(f"Mode:               {mode_str}")
-                print(f"Skill Gap:          {l_elo - p_elo:+.1f} Elo")
-                print(f"Estimated Attempts: {fmt_attempts(attempts)} attempts")
-                print(f"Time to Complete:   {time_str} (at 4 hours/day)")
+                print(f"Mode:                {mode_str}")
+                print(f"Skill Gap:           {l_elo - p_elo:+.1f} Elo")
+                print(f"Estimated Attempts:  {fmt_attempts(attempts)} attempts")
+                print(f"Time to Complete:    {time_str} (at 4 hours/day)")
                 print("-" * 50)
             except ValueError:
                 print("Error: Please enter valid numeric values for Elo and length.")
@@ -294,8 +332,9 @@ def main():
             try:
                 l_elo = float(input("Enter Level Elo (e.g. 2726 for Cataclysm): ").strip())
                 pct = float(input("Enter percentage reached (1 - 100): ").strip())
-                z_str = input("Multi-Zone Weights (start,end,weight | ...) [default 0,100,100]: ").strip()
-                zones = parse_zones(z_str) if z_str else [[0.0, 100.0, 100.0]]
+                print("Multi-Zone Weights format: start,end,weight,mode | ...")
+                z_str = input("Zones [default 0,100,100,w]: ").strip()
+                zones = parse_zones(z_str) if z_str else [[0.0, 100.0, 100.0, 'w']]
                 
                 demo_skill = calculate_demonstrated_skill(l_elo, pct, zones)
                 rank = get_rank_metadata(demo_skill)
